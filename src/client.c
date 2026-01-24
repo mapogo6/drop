@@ -16,17 +16,15 @@ typedef struct sockaddr_in6 address_t;
 
 typedef struct {
   options_t base;
-  const char *filename;
 } client_options_t;
 
 #define PROGRAM_NAME "drop"
 
 //clang-format off
 const char *usage =
-    "Usage: " PROGRAM_NAME " [options] <host> <filename>\n"
+    "Usage: " PROGRAM_NAME " [options] <host> <filename> [filename...]\n"
     "\n"
     "Options:\n"
-    "  -i  <interface> the interace on which to discover servers\n"
     "  -p  <port>      the port <host> is listening on\n"
     "  -v              verbose output\n"
     "  -h              print this message\n"
@@ -36,9 +34,7 @@ const char *usage =
     "  <filename>  file to upload, - for stdin\n";
 // clang-fomat on
 
-static address_t address(const options_t *options);
-
-static void tftp_upload_file(socket_t s, address_t server, char *filename);
+static void upload_file(const options_t *options, const char *filename);
 
 int main(int argc, char **argv) {
   client_options_t options;
@@ -73,7 +69,7 @@ int main(int argc, char **argv) {
   }
 
   if (optind + 1 == argc) {
-    fprintf(stderr, PROGRAM_NAME ": expected <filename argument\n");
+    fprintf(stderr, PROGRAM_NAME ": expected <filename> argument\n");
     puts(usage);
     exit(EXIT_FAILURE);
   }
@@ -81,69 +77,12 @@ int main(int argc, char **argv) {
   /* read positional arguments */
   strncpy(options.base.address.host, argv[optind++],
           sizeof(options.base.address.host));
-  options.filename = argv[optind++];
 
-  const socket_t s = socket(AF_INET6, SOCK_DGRAM, 0);
-  if (s == -1) {
-    fprintf(stderr, "socket: %s\n", strerror(errno));
-    exit(EXIT_FAILURE);
+  for (; optind < argc; ++optind) {
+    upload_file(&options.base, argv[optind]);
   }
-
-  if (-1 == setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, &options.base.v6only,
-                       sizeof(options.base.v6only))) {
-    fprintf(stderr, "setsockopt: %s\n", strerror(errno));
-    exit(EXIT_FAILURE);
-  }
-
-  const address_t server = address((options_t *)&options);
-  tftp_upload_file(s, server, strdup(options.filename));
 
   return EXIT_SUCCESS;
-}
-
-address_t address(const options_t *options) {
-  struct addrinfo hints = {0};
-  hints.ai_socktype = SOCK_DGRAM;
-  hints.ai_protocol = 0;
-  hints.ai_family = AF_INET6;
-  hints.ai_flags = AI_NUMERICSERV | AI_ADDRCONFIG;
-
-  if (!options->v6only) {
-    hints.ai_flags |= AI_V4MAPPED | AI_ALL;
-  }
-
-  const char *host =
-      strlen(options->address.host) == 0 ? NULL : options->address.host;
-  const char *port = options->address.port;
-
-  struct addrinfo *results = NULL;
-  int ret = getaddrinfo(host, port, &hints, &results);
-
-  switch (ret) {
-  case 0:
-    break;
-  case EAI_AGAIN:
-    return address(options);
-  case EAI_SYSTEM:
-    fprintf(stderr, "getaddrinfo failed: '%s'\n", strerror(errno));
-    goto err;
-  default:
-    fprintf(stderr, "getaddrinfo failed: %s\n", gai_strerror(ret));
-    goto err;
-  }
-
-  assert(results);
-  assert(results->ai_family == AF_INET6);
-
-  address_t addr = {0};
-  memcpy(&addr, results->ai_addr, sizeof(addr));
-
-  freeaddrinfo(results);
-  return addr;
-
-err:
-  freeaddrinfo(results);
-  exit(EXIT_FAILURE);
 }
 
 static void tftp_send_write_request(socket_t s, address_t server,
@@ -223,4 +162,66 @@ static void tftp_upload_file(socket_t s, address_t server, char *filename) {
       goto rtx;
     ++block;
   }
+}
+
+address_t address(const options_t *options) {
+  struct addrinfo hints = {0};
+  hints.ai_socktype = SOCK_DGRAM;
+  hints.ai_protocol = 0;
+  hints.ai_family = AF_INET6;
+  hints.ai_flags = AI_NUMERICSERV | AI_ADDRCONFIG;
+
+  if (!options->v6only) {
+    hints.ai_flags |= AI_V4MAPPED | AI_ALL;
+  }
+
+  const char *host =
+      strlen(options->address.host) == 0 ? NULL : options->address.host;
+  const char *port = options->address.port;
+
+  struct addrinfo *results = NULL;
+  int ret = getaddrinfo(host, port, &hints, &results);
+
+  switch (ret) {
+  case 0:
+    break;
+  case EAI_AGAIN:
+    return address(options);
+  case EAI_SYSTEM:
+    fprintf(stderr, "getaddrinfo failed: '%s'\n", strerror(errno));
+    goto err;
+  default:
+    fprintf(stderr, "getaddrinfo failed: %s\n", gai_strerror(ret));
+    goto err;
+  }
+
+  assert(results);
+  assert(results->ai_family == AF_INET6);
+
+  address_t addr = {0};
+  memcpy(&addr, results->ai_addr, sizeof(addr));
+
+  freeaddrinfo(results);
+  return addr;
+
+err:
+  freeaddrinfo(results);
+  exit(EXIT_FAILURE);
+}
+
+static void upload_file(const options_t *options, const char *filename) {
+  const socket_t s = socket(AF_INET6, SOCK_DGRAM, 0);
+  if (s == -1) {
+    fprintf(stderr, "socket: %s\n", strerror(errno));
+    exit(EXIT_FAILURE);
+  }
+
+  if (-1 == setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, &options->v6only,
+                       sizeof(options->v6only))) {
+    fprintf(stderr, "setsockopt: %s\n", strerror(errno));
+    exit(EXIT_FAILURE);
+  }
+
+  const address_t server = address(options);
+  tftp_upload_file(s, server, strdup(filename));
 }
