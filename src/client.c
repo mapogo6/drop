@@ -109,7 +109,7 @@ address_t address(const options_t *options) {
   hints.ai_flags = AI_NUMERICSERV | AI_ADDRCONFIG;
 
   if (!options->v6only) {
-    hints.ai_flags |= AI_V4MAPPED;
+    hints.ai_flags |= AI_V4MAPPED | AI_ALL;
   }
 
   const char *host =

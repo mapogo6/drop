@@ -44,10 +44,6 @@ static address_t address(const server_options_t *options) {
   hints.ai_family = AF_INET6;
   hints.ai_flags = AI_PASSIVE | AI_NUMERICSERV | AI_ADDRCONFIG;
 
-  if (!options->base.v6only) {
-    hints.ai_flags |= AI_V4MAPPED;
-  }
-
   const char *host = strlen(options->base.address.host) == 0
                          ? NULL
                          : options->base.address.host;
@@ -82,9 +78,9 @@ err:
   exit(EXIT_FAILURE);
 }
 
-static bool sockname(address_t addr, sockname_t *out) {
+static bool sockname(const address_t *addr, sockname_t *out) {
   char host[NI_MAXHOST] = {0}, serv[NI_MAXSERV] = {0};
-  if (0 != getnameinfo((struct sockaddr *)&addr, sizeof(addr), host,
+  if (0 != getnameinfo((struct sockaddr *)addr, sizeof(address_t), host,
                        sizeof(host), serv, sizeof(serv),
                        NI_NUMERICHOST | NI_NUMERICSERV)) {
 
@@ -106,6 +102,9 @@ static void tftp_send_ack(socket_t s, const address_t *client,
     fprintf(stderr, "sendto failed: %s\n", strerror(errno));
     exit(EXIT_FAILURE);
   }
+
+  /* verbose */ printf("[%d] <<< opcode: ack, block: %d\n",
+                       ntohs(client->sin6_port), block);
 }
 
 static void tftp_send_error(socket_t s, const address_t *client,
@@ -122,6 +121,9 @@ static void tftp_send_error(socket_t s, const address_t *client,
     fprintf(stderr, "sendto: %s\n", strerror(errno));
     exit(EXIT_FAILURE);
   }
+
+  /* error */ printf("[%d] opcode: err, code: %d, message: %s\n",
+                     ntohs(client->sin6_port), code, message);
 }
 
 typedef struct {
@@ -185,14 +187,10 @@ void tftp_session_swap(tftp_session_t *lhs, tftp_session_t *rhs) {
   assert(lhs);
   assert(rhs);
 
-  size_t tid = lhs->tid;
-  FILE *file = lhs->file;
-
-  lhs->tid = rhs->tid;
-  lhs->file = rhs->file;
-
-  rhs->tid = tid;
-  rhs->file = file;
+  tftp_session_t tmp = {0};
+  memcpy(&tmp, lhs, sizeof(tftp_session_t));
+  memcpy(lhs, rhs, sizeof(tftp_session_t));
+  memcpy(rhs, &tmp, sizeof(tftp_session_t));
 }
 
 void tftp_sessions_list_pop(tftp_sessions_list_t *sessions, uint16_t tid) {
@@ -223,15 +221,24 @@ typedef struct {
 } expected_tftp_block_t;
 
 expected_tftp_block_t tftp_session_advance(tftp_sessions_list_t *sessions,
-                                           uint16_t tid, tftp_buffer_t *buffer,
-                                           size_t size) {
+                                           const address_t *source,
+                                           tftp_buffer_t *buffer, size_t size) {
   assert(sessions);
+  assert(source);
+  assert(buffer);
 
   tftp_packet_t packet;
   assert(tftp_parse(buffer, size, &packet));
 
+  const uint16_t tid = ntohs(source->sin6_port);
+
   tftp_session_t *session = tftp_sessions_list_find(sessions, tid);
   if (!session) {
+    sockname_t source_name = {0};
+    assert(sockname(source, &source_name));
+
+    /* info */ printf("[%d] new transaction from '%s'\n", tid,
+                      source_name.host);
     session = tftp_sessions_list_push(sessions, tid);
   }
 
@@ -241,13 +248,22 @@ expected_tftp_block_t tftp_session_advance(tftp_sessions_list_t *sessions,
   case TFTP_OPCODE_WRQ:
     assert(!session->file);
     assert(session->last_block == 0);
+
+    /* info */ printf("[%d] >>> opcode: wrq, filename: '%s', mode: '%s'\n", tid,
+                      packet.wrq.filename, packet.wrq.mode);
+
     session->file = fopen(packet.wrq.filename, "wb");
+    assert(session->file); /* todo: handle error here */
+
     return (expected_tftp_block_t){
         .has_value = true,
         .value = 0,
     };
   case TFTP_OPCODE_DATA: {
     assert(session->file);
+
+    /* verbose */ printf("[%d] >>> opcode: data, block: %d, size: %zd\n", tid,
+                         packet.data.block, packet.data.size);
 
     /* check if this is a retransmit */
     if (packet.data.block == session->last_block) {
@@ -274,6 +290,7 @@ expected_tftp_block_t tftp_session_advance(tftp_sessions_list_t *sessions,
     /* if this is the last chunk, stop tracking this session */
     /* todo: how to handle rtx of last block? */
     if (written != TFTP_BLOCK_SIZE) {
+      /* info */ printf("[%d] transaction complete\n", tid);
       tftp_sessions_list_pop(sessions, tid);
     }
     return (expected_tftp_block_t){
@@ -290,23 +307,26 @@ static void tftp_transfer(socket_t s, tftp_sessions_list_t *sessions) {
   assert(s != -1);
   assert(sessions);
 
-  address_t client = {0};
-  socklen_t client_len = sizeof(client);
+  address_t source = {0};
+  socklen_t source_len = sizeof(source);
 
   tftp_buffer_t buffer = {0};
   const ssize_t bytes = recvfrom(s, buffer.buffer, sizeof(buffer.buffer), 0,
-                                 (struct sockaddr *)&client, &client_len);
+                                 (struct sockaddr *)&source, &source_len);
   if (bytes == -1) {
     fprintf(stderr, "recv failed: '%s'", strerror(errno));
     exit(EXIT_FAILURE);
   }
 
-  const uint16_t tid = ntohs(client.sin6_port);
   expected_tftp_block_t block =
-      tftp_session_advance(sessions, tid, &buffer, bytes);
+      tftp_session_advance(sessions, &source, &buffer, bytes);
   assert(block.has_value);
 
-  tftp_send_ack(s, &client, &buffer, block.value);
+  if (block.has_value) {
+    tftp_send_ack(s, &source, &buffer, block.value);
+  } else {
+    tftp_send_error(s, &source, &buffer, block.error.code, block.error.message);
+  }
 }
 
 int main(int argc, char **argv) {
@@ -358,7 +378,7 @@ int main(int argc, char **argv) {
   }
 
   sockname_t servername = {0};
-  assert(sockname(server, &servername));
+  assert(sockname(&server, &servername));
   printf("listening on %s:%s\n", servername.host, servername.port);
 
   tftp_sessions_list_t sessions = {0};
