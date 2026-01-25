@@ -281,7 +281,7 @@ int loop(socket_t socket, const address_t *bind_address) {
       break;
     case 0: /* we're the child */
       close(socket);
-      tftp_handle_wrq(client, &buffer, received);
+      tftp_handle_wrq(client, &buffer, received, NULL, NULL);
       close(client);
       return 0;
     default: /* we're the parent */

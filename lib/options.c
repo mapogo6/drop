@@ -18,7 +18,7 @@ options_t options_new(void) {
   return options;
 }
 
-void options_from_arguments(options_t *options, int argc, char **argv) {
+void options_from_arguments(options_t *options, int argc, char *const *argv) {
   int option;
 
   while ((option = getopt(argc, argv, COMMON_GETOPT_STRING)) != -1) {

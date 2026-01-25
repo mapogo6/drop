@@ -30,8 +30,6 @@ typedef struct {
   const char *mode;
 } tftp_wrq_t;
 
-typedef uint16_t tftp_block_t;
-
 typedef struct {
   tftp_block_t block;
   const uint8_t *data;
@@ -74,9 +72,20 @@ typedef struct {
   uint8_t *end;
 } tftp_buffer_view_t;
 
-static tftp_buffer_view_t tftp_buffer_reader(tftp_buffer_t *buffer,
-                                             size_t size);
-static tftp_buffer_view_t tftp_buffer_writer(tftp_buffer_t *buffer);
+static tftp_buffer_view_t tftp_reader(tftp_buffer_t *buffer, size_t size) {
+  return (tftp_buffer_view_t){
+      .begin = buffer->buffer,
+      .end = buffer->buffer + size,
+  };
+}
+
+static tftp_buffer_view_t tftp_writer(tftp_buffer_t *buffer) {
+  return tftp_reader(buffer, sizeof(buffer->buffer));
+}
+
+static size_t tftp_buffer_view_capacity(tftp_buffer_view_t *view) {
+  return view->end - view->begin;
+}
 
 typedef struct {
   bool has_value;
@@ -85,30 +94,6 @@ typedef struct {
     int error;
   };
 } expected_uint16_t;
-
-typedef struct {
-  bool has_value;
-  union {
-    const char *value;
-    int error;
-  };
-} expected_string_t;
-
-static tftp_buffer_view_t tftp_buffer_reader(tftp_buffer_t *buffer,
-                                             size_t size) {
-  return (tftp_buffer_view_t){
-      .begin = buffer->buffer,
-      .end = buffer->buffer + size,
-  };
-}
-
-static tftp_buffer_view_t tftp_buffer_writer(tftp_buffer_t *buffer) {
-  return tftp_buffer_reader(buffer, sizeof(buffer->buffer));
-}
-
-static size_t tftp_buffer_view_capacity(tftp_buffer_view_t *view) {
-  return view->end - view->begin;
-}
 
 static expected_uint16_t tftp_buffer_read_uint16_t(tftp_buffer_view_t *reader) {
   if (tftp_buffer_view_capacity(reader) < sizeof(uint16_t))
@@ -127,6 +112,14 @@ static expected_uint16_t tftp_buffer_read_uint16_t(tftp_buffer_view_t *reader) {
       .value = ntohs(result),
   };
 }
+
+typedef struct {
+  bool has_value;
+  union {
+    const char *value;
+    int error;
+  };
+} expected_string_t;
 
 static expected_string_t tftp_buffer_read_string(tftp_buffer_view_t *reader) {
   const char *string = (const char *)reader->begin;
@@ -155,9 +148,9 @@ typedef struct {
   };
 } expected_size_t;
 
-static expected_size_t tftp_buffer_write_data(tftp_buffer_view_t *writer,
-                                              const uint8_t *data,
-                                              size_t size) {
+static expected_size_t
+tftp_buffer_write_octet_string(tftp_buffer_view_t *writer, const uint8_t *data,
+                               size_t size) {
   if (tftp_buffer_view_capacity(writer) < size)
     return (expected_size_t){
         .has_value = false,
@@ -176,13 +169,14 @@ static expected_size_t tftp_buffer_write_data(tftp_buffer_view_t *writer,
 static expected_size_t tftp_buffer_write_uint16_t(tftp_buffer_view_t *writer,
                                                   uint16_t value) {
   value = htons(value);
-  return tftp_buffer_write_data(writer, (const uint8_t *)&value, sizeof(value));
+  return tftp_buffer_write_octet_string(writer, (const uint8_t *)&value,
+                                        sizeof(value));
 }
 
 static expected_size_t tftp_buffer_write_string(tftp_buffer_view_t *writer,
                                                 const char *value) {
-  return tftp_buffer_write_data(writer, (const uint8_t *)value,
-                                strlen(value) + 1);
+  return tftp_buffer_write_octet_string(writer, (const uint8_t *)value,
+                                        strlen(value) + 1);
 }
 
 typedef struct {
@@ -193,7 +187,7 @@ typedef struct {
   };
 } expected_tftp_rrq_t;
 
-static expected_tftp_rrq_t tftp_read_rrq(tftp_buffer_view_t *reader) {
+static expected_tftp_rrq_t tftp_buffer_read_rrq(tftp_buffer_view_t *reader) {
   expected_string_t filename = tftp_buffer_read_string(reader);
   if (!filename.has_value)
     return (expected_tftp_rrq_t){
@@ -226,15 +220,15 @@ typedef struct {
   };
 } expected_tftp_wrq_t;
 
-static expected_tftp_wrq_t tftp_read_wrq(tftp_buffer_view_t *writer) {
-  expected_string_t filename = tftp_buffer_read_string(writer);
+static expected_tftp_wrq_t tftp_buffer_read_wrq(tftp_buffer_view_t *reader) {
+  expected_string_t filename = tftp_buffer_read_string(reader);
   if (!filename.has_value)
     return (expected_tftp_wrq_t){
         .has_value = false,
         .error = filename.error,
     };
 
-  expected_string_t mode = tftp_buffer_read_string(writer);
+  expected_string_t mode = tftp_buffer_read_string(reader);
   if (!mode.has_value)
     return (expected_tftp_wrq_t){
         .has_value = false,
@@ -259,7 +253,7 @@ typedef struct {
   };
 } expected_tftp_data_t;
 
-static expected_tftp_data_t tftp_read_data(tftp_buffer_view_t *reader) {
+static expected_tftp_data_t tftp_buffer_read_data(tftp_buffer_view_t *reader) {
   expected_uint16_t block = tftp_buffer_read_uint16_t(reader);
   if (!block.has_value)
     return (expected_tftp_data_t){
@@ -286,7 +280,7 @@ typedef struct {
   };
 } expected_tftp_ack_t;
 
-static expected_tftp_ack_t tftp_read_ack(tftp_buffer_view_t *reader) {
+static expected_tftp_ack_t tftp_buffer_read_ack(tftp_buffer_view_t *reader) {
   expected_uint16_t block = tftp_buffer_read_uint16_t(reader);
   if (!block.has_value)
     return (expected_tftp_ack_t){
@@ -311,7 +305,8 @@ typedef struct {
   };
 } expected_tftp_error_t;
 
-static expected_tftp_error_t tftp_read_error(tftp_buffer_view_t *reader) {
+static expected_tftp_error_t
+tftp_buffer_read_error(tftp_buffer_view_t *reader) {
   expected_uint16_t code = tftp_buffer_read_uint16_t(reader);
   if (!code.has_value)
     return (expected_tftp_error_t){
@@ -344,8 +339,9 @@ typedef struct {
   };
 } expected_tftp_packet_t;
 
-static expected_tftp_packet_t tftp_parse(tftp_buffer_t *buffer, size_t size) {
-  tftp_buffer_view_t reader = tftp_buffer_reader(buffer, size);
+static expected_tftp_packet_t tftp_buffer_read_packet(tftp_buffer_t *buffer,
+                                                      size_t size) {
+  tftp_buffer_view_t reader = tftp_reader(buffer, size);
   expected_uint16_t opcode = tftp_buffer_read_uint16_t(&reader);
   if (!opcode.has_value)
     return (expected_tftp_packet_t){
@@ -355,7 +351,7 @@ static expected_tftp_packet_t tftp_parse(tftp_buffer_t *buffer, size_t size) {
 
   switch (opcode.value) {
   case TFTP_OPCODE_RRQ: {
-    expected_tftp_rrq_t rrq = tftp_read_rrq(&reader);
+    expected_tftp_rrq_t rrq = tftp_buffer_read_rrq(&reader);
     if (!rrq.has_value)
       return (expected_tftp_packet_t){
           .has_value = false,
@@ -372,7 +368,7 @@ static expected_tftp_packet_t tftp_parse(tftp_buffer_t *buffer, size_t size) {
     };
   }
   case TFTP_OPCODE_WRQ: {
-    expected_tftp_wrq_t wrq = tftp_read_wrq(&reader);
+    expected_tftp_wrq_t wrq = tftp_buffer_read_wrq(&reader);
     if (!wrq.has_value)
       return (expected_tftp_packet_t){
           .has_value = false,
@@ -389,7 +385,7 @@ static expected_tftp_packet_t tftp_parse(tftp_buffer_t *buffer, size_t size) {
     };
   }
   case TFTP_OPCODE_DATA: {
-    expected_tftp_data_t data = tftp_read_data(&reader);
+    expected_tftp_data_t data = tftp_buffer_read_data(&reader);
     if (!data.has_value)
       return (expected_tftp_packet_t){
           .has_value = false,
@@ -406,7 +402,7 @@ static expected_tftp_packet_t tftp_parse(tftp_buffer_t *buffer, size_t size) {
     };
   }
   case TFTP_OPCODE_ACK: {
-    expected_tftp_ack_t ack = tftp_read_ack(&reader);
+    expected_tftp_ack_t ack = tftp_buffer_read_ack(&reader);
     if (!ack.has_value)
       return (expected_tftp_packet_t){
           .has_value = false,
@@ -422,7 +418,7 @@ static expected_tftp_packet_t tftp_parse(tftp_buffer_t *buffer, size_t size) {
     };
   }
   case TFTP_OPCODE_ERROR: {
-    expected_tftp_error_t error = tftp_read_error(&reader);
+    expected_tftp_error_t error = tftp_buffer_read_error(&reader);
     if (!error.has_value)
       return (expected_tftp_packet_t){
           .has_value = false,
@@ -443,9 +439,10 @@ static expected_tftp_packet_t tftp_parse(tftp_buffer_t *buffer, size_t size) {
   }
 }
 
-static expected_size_t tftp_rrq(tftp_buffer_t *buffer, const char *in_filename,
-                                const char *in_mode) {
-  tftp_buffer_view_t writer = tftp_buffer_writer(buffer);
+static expected_size_t tftp_buffer_write_rrq(tftp_buffer_t *buffer,
+                                             const char *in_filename,
+                                             const char *in_mode) {
+  tftp_buffer_view_t writer = tftp_writer(buffer);
 
   const expected_size_t opcode =
       tftp_buffer_write_uint16_t(&writer, TFTP_OPCODE_RRQ);
@@ -476,9 +473,10 @@ static expected_size_t tftp_rrq(tftp_buffer_t *buffer, const char *in_filename,
   };
 }
 
-static expected_size_t tftp_wrq(tftp_buffer_t *buffer, const char *in_filename,
-                                const char *in_mode) {
-  tftp_buffer_view_t writer = tftp_buffer_writer(buffer);
+static expected_size_t tftp_buffer_write_wrq(tftp_buffer_t *buffer,
+                                             const char *in_filename,
+                                             const char *in_mode) {
+  tftp_buffer_view_t writer = tftp_writer(buffer);
 
   const expected_size_t opcode =
       tftp_buffer_write_uint16_t(&writer, TFTP_OPCODE_WRQ);
@@ -509,9 +507,11 @@ static expected_size_t tftp_wrq(tftp_buffer_t *buffer, const char *in_filename,
   };
 }
 
-static expected_size_t tftp_data(tftp_buffer_t *buffer, tftp_block_t in_block,
-                                 const uint8_t *in_data, size_t in_data_size) {
-  tftp_buffer_view_t writer = tftp_buffer_writer(buffer);
+static expected_size_t tftp_buffer_write_data(tftp_buffer_t *buffer,
+                                              tftp_block_t in_block,
+                                              const uint8_t *in_data,
+                                              size_t in_data_size) {
+  tftp_buffer_view_t writer = tftp_writer(buffer);
 
   const expected_size_t opcode =
       tftp_buffer_write_uint16_t(&writer, TFTP_OPCODE_DATA);
@@ -529,7 +529,7 @@ static expected_size_t tftp_data(tftp_buffer_t *buffer, tftp_block_t in_block,
     };
 
   const expected_size_t data =
-      tftp_buffer_write_data(&writer, in_data, in_data_size);
+      tftp_buffer_write_octet_string(&writer, in_data, in_data_size);
   if (!data.has_value)
     return (expected_size_t){
         .has_value = false,
@@ -542,8 +542,9 @@ static expected_size_t tftp_data(tftp_buffer_t *buffer, tftp_block_t in_block,
   };
 }
 
-static expected_size_t tftp_ack(tftp_buffer_t *buffer, tftp_block_t in_block) {
-  tftp_buffer_view_t writer = tftp_buffer_writer(buffer);
+static expected_size_t tftp_buffer_write_ack(tftp_buffer_t *buffer,
+                                             tftp_block_t in_block) {
+  tftp_buffer_view_t writer = tftp_writer(buffer);
   expected_size_t opcode = tftp_buffer_write_uint16_t(&writer, TFTP_OPCODE_ACK);
   if (!opcode.has_value)
     return (expected_size_t){
@@ -564,9 +565,10 @@ static expected_size_t tftp_ack(tftp_buffer_t *buffer, tftp_block_t in_block) {
   };
 }
 
-static expected_size_t tftp_error(tftp_buffer_t *buffer, tftp_error_code_t code,
-                                  const char *message) {
-  tftp_buffer_view_t writer = tftp_buffer_writer(buffer);
+static expected_size_t tftp_buffer_write_error(tftp_buffer_t *buffer,
+                                               tftp_error_code_t code,
+                                               const char *message) {
+  tftp_buffer_view_t writer = tftp_writer(buffer);
 
   const expected_size_t opcode =
       tftp_buffer_write_uint16_t(&writer, TFTP_OPCODE_ERROR);
@@ -615,33 +617,36 @@ static expected_tftp_packet_t tftp_recv(int socket, tftp_buffer_t *buffer,
       recv(socket, &buffer->buffer, sizeof(buffer->buffer), 0);
   assert(bytes != -1);
 
-  return tftp_parse(buffer, bytes);
+  return tftp_buffer_read_packet(buffer, bytes);
 }
 
 void tftp_send_data(int socket, tftp_buffer_t *buffer, tftp_block_t block,
                     const uint8_t *in_data, size_t in_data_size) {
-  const expected_size_t data = tftp_data(buffer, block, in_data, in_data_size);
+  const expected_size_t data =
+      tftp_buffer_write_data(buffer, block, in_data, in_data_size);
   assert(data.has_value);
   assert(send(socket, &buffer->buffer, data.value, 0) != -1);
 }
 
 void tftp_send_ack(int socket, tftp_buffer_t *buffer, tftp_block_t block) {
-  const expected_size_t ack = tftp_ack(buffer, block);
+  const expected_size_t ack = tftp_buffer_write_ack(buffer, block);
   assert(ack.has_value);
   assert(send(socket, &buffer->buffer, ack.value, 0) != -1);
 }
 
 void tftp_send_error(int socket, tftp_buffer_t *buffer, tftp_error_code_t code,
                      const char *message) {
-  const expected_size_t error = tftp_error(buffer, code, message);
+  const expected_size_t error = tftp_buffer_write_error(buffer, code, message);
   assert(error.has_value);
   assert(send(socket, &buffer->buffer, error.value, 0) != -1);
 }
 
-void tftp_send_wrq(int socket, const char *filename, FILE *file) {
+void tftp_send_wrq(int socket, const char *filename, FILE *file,
+                   tftp_block_cb_t on_block, void *userdata) {
   tftp_buffer_t buffer = {0};
 
-  const expected_size_t wrq = tftp_wrq(&buffer, filename, "netascii");
+  const expected_size_t wrq =
+      tftp_buffer_write_wrq(&buffer, filename, "netascii");
   assert(wrq.has_value);
   assert(send(socket, &buffer.buffer, wrq.value, 0) == wrq.value);
 
@@ -654,26 +659,38 @@ void tftp_send_wrq(int socket, const char *filename, FILE *file) {
   assert(packet.value.opcode == TFTP_OPCODE_ACK);
   assert(packet.value.ack.block == 0);
 
+  if (on_block)
+    on_block(packet.value.ack.block, userdata);
+
   for (;;) {
     uint8_t file_data[TFTP_BLOCK_SIZE] = {0};
     const size_t file_bytes = fread(file_data, 1, sizeof(file_data), file);
 
-    tftp_send_data(socket, &buffer, packet.value.ack.block + 1, file_data,
-                   file_bytes);
+    const tftp_block_t block = packet.value.ack.block + 1;
+    tftp_send_data(socket, &buffer, block, file_data, file_bytes);
+
     packet = tftp_recv(socket, &buffer, NULL);
     assert(packet.has_value);
     assert(packet.value.opcode == TFTP_OPCODE_ACK);
+    /* todo: handle out-of-order ack */
+    assert(packet.value.ack.block == block);
 
-    if (file_bytes < TFTP_BLOCK_SIZE)
+    if (on_block)
+      on_block(block, userdata);
+
+    if (file_bytes < TFTP_BLOCK_SIZE) {
+      assert(feof(file));
       break;
+    }
   }
 }
 
-void tftp_handle_wrq(int socket, tftp_buffer_t *buffer, size_t buffer_size) {
+void tftp_handle_wrq(int socket, tftp_buffer_t *buffer, size_t buffer_size,
+                     tftp_block_cb_t on_block, void *userdata) {
   assert(socket != -1);
   assert(buffer);
 
-  expected_tftp_packet_t packet = tftp_parse(buffer, buffer_size);
+  expected_tftp_packet_t packet = tftp_buffer_read_packet(buffer, buffer_size);
   assert(packet.has_value);
   assert(packet.value.opcode == TFTP_OPCODE_WRQ);
 
@@ -685,6 +702,9 @@ void tftp_handle_wrq(int socket, tftp_buffer_t *buffer, size_t buffer_size) {
 
   tftp_block_t block = 0;
   tftp_send_ack(socket, buffer, block);
+
+  if (on_block)
+    on_block(block, userdata);
 
   for (;;) {
     struct timeval timeout = {
@@ -707,6 +727,9 @@ void tftp_handle_wrq(int socket, tftp_buffer_t *buffer, size_t buffer_size) {
            packet.value.data.size);
 
     tftp_send_ack(socket, buffer, block);
+
+    if (on_block)
+      on_block(block, userdata);
 
     if (packet.value.data.size < TFTP_BLOCK_SIZE)
       break;

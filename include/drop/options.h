@@ -16,5 +16,5 @@ typedef struct {
 
 #define COMMON_GETOPT_STRING "p:v"
 
-void options_from_arguments(options_t *a, int argc, char **argv);
+void options_from_arguments(options_t *a, int argc, char *const *argv);
 void options_from_config(options_t *a, const char *filename);
