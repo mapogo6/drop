@@ -6,6 +6,7 @@
 #include <inttypes.h>
 #include <stdarg.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <stdnoreturn.h>
 #include <string.h>
@@ -58,10 +59,10 @@ static address_t address(const server_options_t *options) {
   case EAI_AGAIN:
     return address(options);
   case EAI_SYSTEM:
-    fprintf(stderr, "getaddrinfo failed: '%s'\n", strerror(errno));
+    /*error*/ fprintf(stderr, "getaddrinfo failed: '%s'\n", strerror(errno));
     goto err;
   default:
-    fprintf(stderr, "getaddrinfo failed: %s\n", gai_strerror(ret));
+    /*error*/ fprintf(stderr, "getaddrinfo failed: %s\n", gai_strerror(ret));
     goto err;
   }
 
@@ -92,242 +93,9 @@ static bool sockname(const address_t *addr, sockname_t *out) {
   return true;
 }
 
-static void tftp_send_ack(socket_t s, const address_t *client,
-                          tftp_buffer_t *packet, tftp_block_t block) {
-  const ssize_t ack_size = tftp_new_ack(packet, block);
-  assert(ack_size != -1);
-
-  if (-1 == sendto(s, packet->buffer, ack_size, 0, (struct sockaddr *)client,
-                   sizeof(address_t))) {
-    fprintf(stderr, "sendto failed: %s\n", strerror(errno));
-    exit(EXIT_FAILURE);
-  }
-
-  /* verbose */ printf("[%d] <<< opcode: ack, block: %d\n",
-                       ntohs(client->sin6_port), block);
-}
-
-static void tftp_send_error(socket_t s, const address_t *client,
-                            tftp_buffer_t *packet, tftp_error_code_t code,
-                            const char *message) {
-  ssize_t error_size = tftp_new_error(packet, code, message);
-  if (-1 == error_size) {
-    fprintf(stderr, "tftp_new_error: %s\n", strerror(errno));
-    exit(EXIT_FAILURE);
-  }
-
-  if (-1 == sendto(s, packet->buffer, error_size, 0, (struct sockaddr *)client,
-                   sizeof(address_t))) {
-    fprintf(stderr, "sendto: %s\n", strerror(errno));
-    exit(EXIT_FAILURE);
-  }
-
-  /* error */ printf("[%d] opcode: err, code: %d, message: %s\n",
-                     ntohs(client->sin6_port), code, message);
-}
-
-typedef struct {
-  uint16_t tid;
-  FILE *file;
-  tftp_block_t last_block;
-} tftp_session_t;
-
-tftp_session_t *tftp_session_init(tftp_session_t *session, uint16_t tid) {
-  assert(session);
-
-  memset(session, 0, sizeof(tftp_session_t));
-  session->tid = tid;
-
-  return session;
-}
-
-void tftp_session_finalize(tftp_session_t *session) {
-  assert(session);
-  if (session->file)
-    fclose(session->file);
-}
-
-typedef struct {
-  tftp_session_t *data;
-  size_t size;
-  size_t capacity;
-} tftp_sessions_list_t;
-
-tftp_session_t *tftp_sessions_list_find(tftp_sessions_list_t *sessions,
-                                        uint16_t tid) {
-  assert(sessions);
-
-  for (size_t i = 0; i < sessions->size; ++i)
-    if (sessions->data[i].tid == tid)
-      return sessions->data + i;
-
-  return NULL;
-}
-
-tftp_session_t *tftp_sessions_list_push(tftp_sessions_list_t *sessions,
-                                        uint16_t tid) {
-  assert(sessions);
-  assert(!tftp_sessions_list_find(sessions, tid));
-
-  const size_t new_size = sessions->size + 1;
-  if (new_size > sessions->capacity) {
-    if (sessions->capacity == 0) {
-      sessions->capacity = new_size;
-    }
-    sessions->data = realloc(sessions->data,
-                             sizeof(tftp_session_t) * sessions->capacity * 2);
-    assert(sessions->data);
-    sessions->capacity *= 2;
-  }
-
-  return tftp_session_init(sessions->data + sessions->size++, tid);
-}
-
-void tftp_session_swap(tftp_session_t *lhs, tftp_session_t *rhs) {
-  assert(lhs);
-  assert(rhs);
-
-  tftp_session_t tmp = {0};
-  memcpy(&tmp, lhs, sizeof(tftp_session_t));
-  memcpy(lhs, rhs, sizeof(tftp_session_t));
-  memcpy(rhs, &tmp, sizeof(tftp_session_t));
-}
-
-void tftp_sessions_list_pop(tftp_sessions_list_t *sessions, uint16_t tid) {
-  for (size_t i = 0; i < sessions->size; ++i)
-    if (sessions->data[i].tid == tid) {
-      sessions->size -= 1;
-      tftp_session_swap(sessions->data + i, sessions->data + sessions->size);
-      tftp_session_finalize(sessions->data + sessions->size);
-    }
-}
-
-void tftp_sessions_list_clear(tftp_sessions_list_t *sessions) {
-  for (size_t i = 0; i < sessions->size; ++i)
-    tftp_session_finalize(sessions->data + i);
-
-  if (sessions->data)
-    free(sessions->data);
-
-  memset(sessions, 0, sizeof(tftp_sessions_list_t));
-}
-
-typedef struct {
-  bool has_value;
-  union {
-    tftp_block_t value;
-    tftp_error_t error;
-  };
-} expected_tftp_block_t;
-
-expected_tftp_block_t tftp_session_advance(tftp_sessions_list_t *sessions,
-                                           const address_t *source,
-                                           tftp_buffer_t *buffer, size_t size) {
-  assert(sessions);
-  assert(source);
-  assert(buffer);
-
-  tftp_packet_t packet;
-  assert(tftp_parse(buffer, size, &packet));
-
-  const uint16_t tid = ntohs(source->sin6_port);
-
-  tftp_session_t *session = tftp_sessions_list_find(sessions, tid);
-  if (!session) {
-    sockname_t source_name = {0};
-    assert(sockname(source, &source_name));
-
-    /* info */ printf("[%d] new transaction from '%s'\n", tid,
-                      source_name.host);
-    session = tftp_sessions_list_push(sessions, tid);
-  }
-
-  assert(session);
-
-  switch (packet.opcode) {
-  case TFTP_OPCODE_WRQ:
-    assert(!session->file);
-    assert(session->last_block == 0);
-
-    /* info */ printf("[%d] >>> opcode: wrq, filename: '%s', mode: '%s'\n", tid,
-                      packet.wrq.filename, packet.wrq.mode);
-
-    session->file = fopen(packet.wrq.filename, "wb");
-    assert(session->file); /* todo: handle error here */
-
-    return (expected_tftp_block_t){
-        .has_value = true,
-        .value = 0,
-    };
-  case TFTP_OPCODE_DATA: {
-    assert(session->file);
-
-    /* verbose */ printf("[%d] >>> opcode: data, block: %d, size: %zd\n", tid,
-                         packet.data.block, packet.data.size);
-
-    /* check if this is a retransmit */
-    if (packet.data.block == session->last_block) {
-      return (expected_tftp_block_t){
-          .has_value = true,
-          .value = packet.data.block,
-      };
-    }
-
-    /* todo: handle an out-of-order block correctly */
-    assert(session->last_block + 1 == packet.data.block);
-    session->last_block = packet.data.block;
-
-    const size_t written =
-        fwrite(packet.data.data, 1, packet.data.size, session->file);
-    if (written != packet.data.size) {
-      tftp_sessions_list_pop(sessions, tid);
-      return (expected_tftp_block_t){
-          .has_value = false,
-          .error = TFTP_ERR_DISK_FULL,
-      };
-    }
-
-    /* if this is the last chunk, stop tracking this session */
-    /* todo: how to handle rtx of last block? */
-    if (written != TFTP_BLOCK_SIZE) {
-      /* info */ printf("[%d] transaction complete\n", tid);
-      tftp_sessions_list_pop(sessions, tid);
-    }
-    return (expected_tftp_block_t){
-        .has_value = true,
-        .value = packet.data.block,
-    };
-  }
-  default:
-    __builtin_unreachable();
-  }
-}
-
-static void tftp_transfer(socket_t s, tftp_sessions_list_t *sessions) {
-  assert(s != -1);
-  assert(sessions);
-
-  address_t source = {0};
-  socklen_t source_len = sizeof(source);
-
-  tftp_buffer_t buffer = {0};
-  const ssize_t bytes = recvfrom(s, buffer.buffer, sizeof(buffer.buffer), 0,
-                                 (struct sockaddr *)&source, &source_len);
-  if (bytes == -1) {
-    fprintf(stderr, "recv failed: '%s'", strerror(errno));
-    exit(EXIT_FAILURE);
-  }
-
-  expected_tftp_block_t block =
-      tftp_session_advance(sessions, &source, &buffer, bytes);
-  assert(block.has_value);
-
-  if (block.has_value) {
-    tftp_send_ack(s, &source, &buffer, block.value);
-  } else {
-    tftp_send_error(s, &source, &buffer, block.error.code, block.error.message);
-  }
-}
+static int udp_accept(socket_t listen_socket, uint16_t listen_port,
+                      void *buffer, size_t *buffer_size);
+static int loop(socket_t socket, const address_t *bind_address);
 
 int main(int argc, char **argv) {
   server_options_t options = {0};
@@ -355,37 +123,170 @@ int main(int argc, char **argv) {
 
   socket_t s = socket(AF_INET6, SOCK_DGRAM, 0);
   if (s == -1) {
-    fprintf(stderr, "socket() failed: '%s'\n", strerror(errno));
+    /*error*/ fprintf(stderr, "socket() failed: '%s'\n", strerror(errno));
+    exit(EXIT_FAILURE);
+  }
+
+  int reuseaddr = 1;
+  if (-1 ==
+      setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &reuseaddr, sizeof(reuseaddr))) {
+    /*error*/ fprintf(stderr, "setsockopt for 'SO_REUSEADDR': %s\n",
+                      strerror(errno));
     exit(EXIT_FAILURE);
   }
 
   if (-1 == setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, &options.base.v6only,
                        sizeof(options.base.v6only))) {
-    fprintf(stderr, "setsockopt for 'IPV6_V6ONLY' option: '%s'\n",
-            strerror(errno));
+    /*error*/ fprintf(stderr, "setsockopt for 'IPV6_V6ONLY': '%s'\n",
+                      strerror(errno));
+    exit(EXIT_FAILURE);
+  }
+
+  int pktinfo = 1;
+  if (-1 == setsockopt(s, IPPROTO_IPV6, IPV6_RECVPKTINFO, &pktinfo,
+                       sizeof(pktinfo))) {
+    /*error*/ fprintf(stderr, "setsockopt for 'IPV6_RECVPKTINFO': %s\n",
+                      strerror(errno));
     exit(EXIT_FAILURE);
   }
 
   address_t server = address(&options);
   if (-1 == bind(s, (struct sockaddr *)&server, sizeof(server))) {
-    fprintf(stderr, "bind failed: '%s'\n", strerror(errno));
+    /*error*/ fprintf(stderr, "bind failed: '%s'\n", strerror(errno));
     exit(EXIT_FAILURE);
   }
 
   socklen_t serverlen = sizeof(server);
   if (-1 == getsockname(s, (struct sockaddr *)&server, &serverlen)) {
-    fprintf(stderr, "getsockname: %s\n", strerror(errno));
+    /*error*/ fprintf(stderr, "getsockname: %s\n", strerror(errno));
   }
 
+  return loop(s, &server);
+}
+
+static ssize_t recvmessage(socket_t s, void *buffer, size_t buffer_size,
+                           int flags, address_t *src, address_t *dst) {
+  assert(buffer);
+
+  struct iovec iov = {
+      .iov_base = buffer,
+      .iov_len = buffer_size,
+  };
+
+  uint8_t cmsg_storage[CMSG_SPACE(sizeof(struct in6_pktinfo))] = {0};
+
+  struct msghdr msg = {0};
+  msg.msg_name = src;
+  msg.msg_namelen = src ? sizeof(address_t) : 0;
+  msg.msg_iov = &iov;
+  msg.msg_iovlen = 1;
+  msg.msg_control = cmsg_storage;
+  msg.msg_controllen = sizeof(cmsg_storage);
+
+  const ssize_t received = recvmsg(s, &msg, flags);
+
+  if (-1 != received) {
+    for (struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg); cmsg != NULL;
+         cmsg = CMSG_NXTHDR(&msg, cmsg)) {
+      if (cmsg->cmsg_level == IPPROTO_IPV6 && cmsg->cmsg_type == IPV6_PKTINFO) {
+        struct in6_pktinfo *pktinfo = (struct in6_pktinfo *)CMSG_DATA(cmsg);
+        memset(dst, 0, sizeof(address_t));
+        dst->sin6_family = AF_INET6;
+        dst->sin6_addr = pktinfo->ipi6_addr;
+        if (IN6_IS_ADDR_LINKLOCAL(&pktinfo->ipi6_addr) ||
+            IN6_IS_ADDR_MC_LINKLOCAL(&pktinfo->ipi6_addr)) {
+          dst->sin6_scope_id = pktinfo->ipi6_ifindex;
+        }
+      }
+    }
+  }
+
+  return received;
+}
+
+static int udp_accept(socket_t listen_socket, uint16_t listen_port,
+                      void *buffer, size_t *buffer_size) {
+  assert(listen_socket != -1);
+  assert(listen_port != 0);
+  assert(buffer);
+  assert(buffer_size);
+
+  address_t source = {0};
+  address_t destination = {0};
+
+  const ssize_t bytes = recvmessage(listen_socket, buffer, *buffer_size, 0,
+                                    &source, &destination);
+  if (bytes == -1) {
+    /*error*/ fprintf(stderr, "recvmessage: %s\n", strerror(errno));
+    return -1;
+  }
+
+  destination.sin6_port = htons(listen_port);
+
+  const socket_t s = socket(AF_INET6, SOCK_DGRAM, 0);
+  if (s == -1) {
+    /*error*/ fprintf(stderr, "socket: %s\n", strerror(errno));
+    return -1;
+  }
+
+  int reuseaddr = 1;
+  if (-1 ==
+      setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &reuseaddr, sizeof(reuseaddr))) {
+    /*error*/ fprintf(stderr, "setsockopt for 'SO_REUSEADDR': %s\n",
+                      strerror(errno));
+    goto err;
+  }
+
+  if (-1 == bind(s, (struct sockaddr *)&destination, sizeof(address_t))) {
+    /*error*/ fprintf(stderr, "bind: %s\n", strerror(errno));
+    goto err;
+  }
+
+  if (-1 == connect(s, (struct sockaddr *)&source, sizeof(address_t))) {
+    /*error*/ fprintf(stderr, "connect: %s\n", strerror(errno));
+    goto err;
+  }
+
+  *buffer_size = (size_t)bytes;
+  return s;
+
+err:
+  close(s);
+  return -1;
+}
+
+int loop(socket_t socket, const address_t *bind_address) {
   sockname_t servername = {0};
-  assert(sockname(&server, &servername));
+  assert(sockname(bind_address, &servername));
+
+  /*verbose*/
   printf("listening on %s:%s\n", servername.host, servername.port);
 
-  tftp_sessions_list_t sessions = {0};
   for (;;) {
-    tftp_transfer(s, &sessions);
-  }
-  tftp_sessions_list_clear(&sessions);
+    tftp_buffer_t buffer = {0};
 
-  return 0;
+    size_t received = sizeof(buffer.buffer);
+    const socket_t client = udp_accept(socket, ntohs(bind_address->sin6_port),
+                                       &buffer.buffer, &received);
+
+    if (client == -1) {
+      continue;
+    }
+
+    const pid_t pid = fork();
+    switch (pid) {
+    case -1:
+      fprintf(stderr, "fork: %s\n", strerror(errno));
+      close(client);
+      break;
+    case 0: /* we're the child */
+      close(socket);
+      tftp_handle_wrq(client, &buffer, received);
+      close(client);
+      return 0;
+    default: /* we're the parent */
+      close(client);
+      break;
+    }
+  }
 }

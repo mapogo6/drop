@@ -4,12 +4,14 @@
 #include <assert.h>
 #include <errno.h>
 #include <getopt.h>
-#include <libgen.h>
 #include <netinet/in.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 typedef int socket_t;
 typedef struct sockaddr_in6 address_t;
@@ -79,89 +81,37 @@ int main(int argc, char **argv) {
           sizeof(options.base.address.host));
 
   for (; optind < argc; ++optind) {
-    upload_file(&options.base, argv[optind]);
-  }
-
-  return EXIT_SUCCESS;
-}
-
-static void tftp_send_write_request(socket_t s, address_t server,
-                                    tftp_buffer_t *buffer,
-                                    const char *filename) {
-  ssize_t request_size = tftp_new_wrq(buffer, filename, "netascii");
-  if (request_size == -1) {
-    fprintf(stderr, "tfpt_new_wrq: %s\n", strerror(errno));
-    exit(EXIT_FAILURE);
-  }
-
-  if (-1 == sendto(s, buffer->buffer, request_size, 0,
-                   (struct sockaddr *)&server, sizeof(server))) {
-    fprintf(stderr, "sendto: %s\n", strerror(errno));
-    exit(EXIT_FAILURE);
-  }
-}
-
-static tftp_ack_t tftp_recv_ack(socket_t s, tftp_buffer_t *buffer) {
-  const ssize_t received = recv(s, buffer->buffer, sizeof(buffer->buffer), 0);
-  if (-1 == received) {
-    fprintf(stderr, "recv: %s\n", strerror(errno));
-    exit(EXIT_FAILURE);
-  }
-
-  tftp_packet_t packet = {0};
-  if (!tftp_parse(buffer, received, &packet)) {
-    fprintf(stderr, "tftp_parse: %s\n", strerror(errno));
-    exit(EXIT_FAILURE);
-  }
-
-  assert(packet.opcode == TFTP_OPCODE_ACK);
-  return packet.ack;
-}
-
-static void tftp_send_data(socket_t s, address_t server, tftp_buffer_t *buffer,
-                           tftp_block_t block, const uint8_t *data,
-                           size_t data_size) {
-  const ssize_t packet_size =
-      tftp_new_data(buffer, block, (const uint8_t *)data, data_size);
-  if (-1 == packet_size) {
-    fprintf(stderr, "tfpt_new_data: %s\n", strerror(errno));
-    exit(EXIT_FAILURE);
-  }
-
-  if (-1 == sendto(s, buffer->buffer, packet_size, 0,
-                   (struct sockaddr *)&server, sizeof(server))) {
-    fprintf(stderr, "sendto: %s\n", strerror(errno));
-    exit(EXIT_FAILURE);
-  }
-}
-
-static void tftp_upload_file(socket_t s, address_t server, char *filename) {
-  FILE *file = stdin;
-  if (strcmp(filename, "-") != 0) {
-    file = fopen(filename, "rb");
-    if (!file) {
-      fprintf(stderr, "fopen: %s\n", strerror(errno));
+    const pid_t pid = fork();
+    switch (pid) {
+    case -1:
+      fprintf(stderr, "fork: %s\n", strerror(errno));
       exit(EXIT_FAILURE);
+    case 0: /* we're the child */
+      upload_file(&options.base, argv[optind]);
+      return EXIT_SUCCESS;
+    default: /* we're the parent */
+      continue;
     }
   }
 
-  tftp_buffer_t transfer = {0};
-  tftp_send_write_request(s, server, &transfer, basename(filename));
-  tftp_recv_ack(s, &transfer);
-
-  free(filename);
-
-  uint8_t file_data[TFTP_BLOCK_SIZE] = {0};
-  size_t file_bytes = 0;
-  tftp_block_t block = 1;
-
-  while ((file_bytes = fread(file_data, 1, sizeof(file_data), file)) != 0) {
-  rtx:
-    tftp_send_data(s, server, &transfer, block, file_data, file_bytes);
-    if (tftp_recv_ack(s, &transfer).block != block)
-      goto rtx;
-    ++block;
+  int wstatus = 0;
+  for (;;) {
+    const pid_t child = waitpid(-1, &wstatus, 0);
+    if (child == -1) {
+      if (errno == EINTR) /* interrupted */
+        continue;
+      if (errno == ECHILD) /* all children exited */
+        break;
+    } else if (WIFEXITED(wstatus)) {
+      printf("[%d] exited normally: %d\n", child, WEXITSTATUS(wstatus));
+    } else if (WIFSIGNALED(wstatus)) {
+      fprintf(stderr, "[%d] killed by signal: %d\n", child, WTERMSIG(wstatus));
+    } else {
+      fprintf(stderr, "[%d] exitd abnormally\n", child);
+    }
   }
+
+  return EXIT_SUCCESS;
 }
 
 address_t address(const options_t *options) {
@@ -222,6 +172,23 @@ static void upload_file(const options_t *options, const char *filename) {
     exit(EXIT_FAILURE);
   }
 
-  const address_t server = address(options);
-  tftp_upload_file(s, server, strdup(filename));
+  const address_t destination = address(options);
+  if (-1 ==
+      connect(s, (const struct sockaddr *)&destination, sizeof(address_t))) {
+    fprintf(stderr, "connect: %s\n", strerror(errno));
+    exit(EXIT_FAILURE);
+  }
+
+  FILE *file = stdin;
+  if (strcmp(filename, "-") != 0) {
+    file = fopen(filename, "rb");
+    if (!file) {
+      fprintf(stderr, "fopen: %s\n", strerror(errno));
+      exit(EXIT_FAILURE);
+    }
+  } else {
+    filename = "stdin";
+  }
+
+  tftp_send_wrq(s, filename, file);
 }
