@@ -14,7 +14,6 @@ typedef struct {
   int verbose;
 } options_t;
 
-#define COMMON_GETOPT_STRING "p:v"
-
-void options_from_arguments(options_t *a, int argc, char *const *argv);
-void options_from_config(options_t *a, const char *filename);
+void options_from_config(const char *filename,
+                         void (*parse)(int, char *const *, options_t *),
+                         options_t *out);

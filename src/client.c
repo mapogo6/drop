@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <getopt.h>
 #include <netinet/in.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdnoreturn.h>
@@ -47,43 +48,68 @@ const char *usage =
     "Usage: " PROGRAM_NAME " [options] <host> <filename> [filename...]\n"
     "\n"
     "Options:\n"
-    "  -p  <port>      the port <host> is listening on\n"
-    "  -v              verbose output\n"
-    "  -h              print this message\n"
+    "  --port,    -p <port> the port <host> is listening on\n"
+    "  --verbose, -v        verbose output\n"
+    "  --help,    -h        print this message\n"
     "\n"
     "Arguments:\n"
     "  <host>      hostname of server\n"
     "  <filename>  file to upload, - for stdin\n";
 // clang-fomat on
 
+static void options_from_argv(int argc, char *const *argv, options_t *out) {
+  struct option const long_options[] = {
+      {
+          .name = "port",
+          .has_arg = required_argument,
+          .flag = NULL,
+          .val = 'p',
+      },
+      {
+          .name = "verbose",
+          .has_arg = no_argument,
+          .flag = NULL,
+          .val = 'v',
+      },
+      {
+          .name = "help",
+          .has_arg = no_argument,
+          .flag = NULL,
+          .val = 'h',
+      },
+      {.name = 0, .has_arg = 0, .flag = 0, .val = 0},
+  };
+
+  optind = 1;
+
+  for (;;) {
+    switch (getopt_long(argc, argv, "p:vh", long_options, NULL)) {
+    case -1:
+      return;
+    case 'p':
+      strncpy(out->address.port, optarg, sizeof(out->address.port));
+      break;
+    case 'v':
+      out->verbose = true;
+      break;
+    case 'h':
+      puts(usage);
+      exit(EXIT_SUCCESS);
+    }
+  }
+}
+
 static void parent_spawn_children(child_t *children,
                                   const client_options_t *options);
 static void parent_monitor_children(child_t *children, size_t count);
 
 int main(int argc, char *const *argv) {
-  client_options_t options;
-
-  /* disable getopt printing errors */
-  opterr = 0;
+  client_options_t options = {0};
 
   /* parse common options first, command-line can override config*/
-  options_from_config((options_t *)&options, "drop.conf");
-  options_from_arguments((options_t *)&options, argc, argv);
-
-  /* reset getopt for common options */
-  optind = 1;
-
-  /* read app specific options */
-  int option = 0;
-  while ((option = getopt(argc, argv, COMMON_GETOPT_STRING "h")) != -1) {
-    switch (option) {
-    case 'h':
-      puts(usage);
-      exit(EXIT_SUCCESS);
-    default: /* ignore unknown options */
-      break;
-    }
-  }
+  options_from_config("drop/" PROGRAM_NAME ".conf", &options_from_argv,
+                      (options_t *)&options);
+  options_from_argv(argc, argv, (options_t *)&options);
 
   if (optind == argc) {
     fprintf(stderr,

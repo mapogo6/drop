@@ -3,6 +3,7 @@
 
 #include <assert.h>
 #include <errno.h>
+#include <getopt.h>
 #include <inttypes.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -29,29 +30,30 @@ typedef struct {
 
 // clang-format off
 const char *usage =
-  "Usage: " PROGRAM_NAME " [options]\n"
+  "Usage: " PROGRAM_NAME " [options] [bind[:port]]\n"
   "\n"
+  "Arguemnts:\n"
+  "  bind: the address to to listen on. Default is the 'any' address\n"
+  "  port: the port to listen on. Default is '0'\n"
   "Options:\n"
-  "  -p  <port>       the <port> server will listen on\n"
-  "  -v               verbose output\n"
-  "  -h               print this message\n";
+  "  -v, --verbose verbose output\n"
+  "  -h, --help    print this message\n";
 // clang-format on
 
 /* creates address_t from options */
-static address_t address(const server_options_t *options) {
+static address_t address(const options_t *options) {
   struct addrinfo hints = {0};
   hints.ai_socktype = SOCK_DGRAM;
   hints.ai_protocol = 0;
   hints.ai_family = AF_INET6;
   hints.ai_flags = AI_PASSIVE | AI_NUMERICSERV | AI_ADDRCONFIG;
 
-  const char *host = strlen(options->base.address.host) == 0
-                         ? NULL
-                         : options->base.address.host;
-  const char *port = options->base.address.port;
+  const char *host =
+      strlen(options->address.host) == 0 ? NULL : options->address.host;
+  const char *port = options->address.port;
 
   struct addrinfo *results = NULL;
-  int ret = getaddrinfo(host, port, &hints, &results);
+  const int ret = getaddrinfo(host, port, &hints, &results);
 
   switch (ret) {
   case 0:
@@ -96,6 +98,7 @@ static bool sockname(const address_t *addr, sockname_t *out) {
 static int udp_accept(socket_t listen_socket, uint16_t listen_port,
                       void *buffer, size_t *buffer_size);
 static int loop(socket_t socket, const address_t *bind_address);
+static void options_from_argv(int argc, char *const *argv, options_t *out);
 
 int main(int argc, char **argv) {
   server_options_t options = {0};
@@ -104,22 +107,9 @@ int main(int argc, char **argv) {
   opterr = 0;
 
   /* parse common options first, command-line can override config */
-  options_from_config((options_t *)&options, "dropd.conf");
-  options_from_arguments((options_t *)&options, argc, argv);
-
-  /* reset getopt for common options */
-  optind = 1;
-
-  int option = 0;
-  while ((option = getopt(argc, argv, COMMON_GETOPT_STRING "h")) != -1) {
-    switch (option) {
-    case 'h':
-      puts(usage);
-      exit(EXIT_SUCCESS);
-    default: /* ignore unknown options, they may be common */
-      break;
-    }
-  }
+  options_from_config(PROGRAM_NAME ".conf", &options_from_argv,
+                      (options_t *)&options);
+  options_from_argv(argc, argv, (options_t *)&options);
 
   socket_t s = socket(AF_INET6, SOCK_DGRAM, 0);
   if (s == -1) {
@@ -150,7 +140,7 @@ int main(int argc, char **argv) {
     exit(EXIT_FAILURE);
   }
 
-  address_t server = address(&options);
+  address_t server = address(&options.base);
   if (-1 == bind(s, (struct sockaddr *)&server, sizeof(server))) {
     /*error*/ fprintf(stderr, "bind failed: '%s'\n", strerror(errno));
     exit(EXIT_FAILURE);
@@ -287,6 +277,41 @@ int loop(socket_t socket, const address_t *bind_address) {
     default: /* we're the parent */
       close(client);
       break;
+    }
+  }
+}
+
+static void options_from_argv(int argc, char *const *argv, options_t *out) {
+  struct option const long_options[] = {
+      {
+          .name = "verbose",
+          .has_arg = no_argument,
+          .flag = NULL,
+          .val = 'v',
+      },
+      {
+          .name = "help",
+          .has_arg = no_argument,
+          .flag = NULL,
+          .val = 'h',
+      },
+      {.name = 0, .has_arg = 0, .flag = 0, .val = 0},
+  };
+
+  optind = 1;
+
+  for (;;) {
+    switch (getopt_long(argc, argv, "vh", long_options, NULL)) {
+    case -1:
+      return;
+    case 'v':
+      out->verbose = true;
+      break;
+    case 'h':
+      puts(usage);
+      exit(EXIT_SUCCESS);
+    default:
+      exit(EXIT_FAILURE);
     }
   }
 }
