@@ -61,13 +61,13 @@ static void parent_spawn_children(child_t *children,
 static void parent_monitor_children(child_t *children, size_t count);
 
 int main(int argc, char *const *argv) {
-  client_options_t options;
+  client_options_t options = {0};
 
   /* disable getopt printing errors */
   opterr = 0;
 
   /* parse common options first, command-line can override config*/
-  options_from_config((options_t *)&options, "drop.conf");
+  options_from_config((options_t *)&options, "drop/" PROGRAM_NAME ".conf");
   options_from_arguments((options_t *)&options, argc, argv);
 
   /* reset getopt for common options */

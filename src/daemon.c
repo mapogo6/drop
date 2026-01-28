@@ -38,20 +38,19 @@ const char *usage =
 // clang-format on
 
 /* creates address_t from options */
-static address_t address(const server_options_t *options) {
+static address_t address(const options_t *options) {
   struct addrinfo hints = {0};
   hints.ai_socktype = SOCK_DGRAM;
   hints.ai_protocol = 0;
   hints.ai_family = AF_INET6;
   hints.ai_flags = AI_PASSIVE | AI_NUMERICSERV | AI_ADDRCONFIG;
 
-  const char *host = strlen(options->base.address.host) == 0
-                         ? NULL
-                         : options->base.address.host;
-  const char *port = options->base.address.port;
+  const char *host =
+      strlen(options->address.host) == 0 ? NULL : options->address.host;
+  const char *port = options->address.port;
 
   struct addrinfo *results = NULL;
-  int ret = getaddrinfo(host, port, &hints, &results);
+  const int ret = getaddrinfo(host, port, &hints, &results);
 
   switch (ret) {
   case 0:
@@ -104,7 +103,7 @@ int main(int argc, char **argv) {
   opterr = 0;
 
   /* parse common options first, command-line can override config */
-  options_from_config((options_t *)&options, "dropd.conf");
+  options_from_config((options_t *)&options, PROGRAM_NAME ".conf");
   options_from_arguments((options_t *)&options, argc, argv);
 
   /* reset getopt for common options */
@@ -150,7 +149,7 @@ int main(int argc, char **argv) {
     exit(EXIT_FAILURE);
   }
 
-  address_t server = address(&options);
+  address_t server = address(&options.base);
   if (-1 == bind(s, (struct sockaddr *)&server, sizeof(server))) {
     /*error*/ fprintf(stderr, "bind failed: '%s'\n", strerror(errno));
     exit(EXIT_FAILURE);
